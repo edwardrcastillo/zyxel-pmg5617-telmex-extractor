@@ -217,6 +217,69 @@ class ZyxelPMG5617Extractor:
             data = json.loads(resp.read().decode('utf-8'))
             return self._decrypt_payload(data)
 
+    def _encrypt_payload(self, obj):
+        """Cifra el cuerpo de la petición con la clave AES de sesión y PKCS7."""
+        raw_json = json.dumps(obj)
+        iv = os.urandom(16)
+        padder = sym_padding.PKCS7(128).padder()
+        padded_data = padder.update(raw_json.encode('utf-8')) + padder.finalize()
+        cipher = Cipher(algorithms.AES(self.aes_key), modes.CBC(iv))
+        encryptor = cipher.encryptor()
+        enc_content = encryptor.update(padded_data) + encryptor.finalize()
+        return json.dumps({
+            "content": base64.b64encode(enc_content).decode('utf-8'),
+            "iv": base64.b64encode(iv).decode('utf-8')
+        }).encode('utf-8')
+
+    def put_dal(self, oid, obj):
+        """Envía una modificación autenticada y cifrada con AES al Data Access Layer."""
+        url = f"http://{self.host}/cgi-bin/DAL?oid={oid}&sessionkey={self.session_key}"
+        body = self._encrypt_payload(obj)
+        headers = {"Content-Type": "application/json;charset=UTF-8"}
+        if self.session_cookie:
+            headers["Cookie"] = self.session_cookie
+        req = urllib.request.Request(url, data=body, headers=headers, method="PUT")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return self._decrypt_payload(data)
+
+    def set_sip_enabled(self, enable=True):
+        """Habilita o deshabilita el perfil VoIP SIP en el router (libera la línea para Asterisk)."""
+        val = "Enabled" if enable else "Disabled"
+        sip_sp = self.query_cgi("/cgi-bin/DAL?oid=sip_sp")
+        sp = (sip_sp.get("Object") or [{}])[0]
+        sp["ProfleEnable"] = val
+        sp["EditPath"] = f"VoiceProfile.{sp.get('profileIdx', 1)}"
+        return self.put_dal("sip_sp", sp)
+
+    def unregister_sip(self):
+        """Fuerza el desregistro inmediato en Telmex IMS (SIP REGISTER Expires: 0)."""
+        obj = {"idx0": 1, "idx1": 1, "idx2": 1, "X_ZYXEL_DoRegister": 2}
+        return self.put_dal("VOIP_Status", obj)
+
+    def register_sip(self):
+        """Fuerza el registro en Telmex IMS."""
+        obj = {"idx0": 1, "idx1": 1, "idx2": 1, "X_ZYXEL_DoRegister": 1}
+        return self.put_dal("VOIP_Status", obj)
+
+    def get_sip_status(self):
+        """Consulta el estado operativo de la línea telefónica y el perfil SIP."""
+        vstatus = self.query_cgi("/cgi-bin/DAL?oid=VOIP_Status")
+        sip_acc = self.query_cgi("/cgi-bin/DAL?oid=sip_account")
+        sip_sp = self.query_cgi("/cgi-bin/DAL?oid=sip_sp")
+        line_info = ((vstatus.get("Object") or [{}])[0].get("LineInfo") or [{}])[0]
+        acc_info = (sip_acc.get("Object") or [{}])[0]
+        sp_info = (sip_sp.get("Object") or [{}])[0]
+        return {
+            "line_enable": acc_info.get("Enable", "Unknown"),
+            "provider_enable": sp_info.get("ProfleEnable", "Unknown"),
+            "status": line_info.get("Status", "Unknown"),
+            "call_state": line_info.get("CallState", "Unknown"),
+            "directory_number": line_info.get("DirectoryNumber", acc_info.get("DirectoryNumber")),
+            "auth_user": acc_info.get("AuthUserName"),
+            "proxy": sp_info.get("ProxyServer")
+        }
+
     def logout(self):
         """Cierra la sesión limpiamente para no bloquear futuros accesos."""
         if self.session_key and self.session_cookie:
@@ -334,6 +397,29 @@ def main():
         help="Guarda el informe en el archivo especificado (.json o .md)."
     )
 
+    # Control y Gestión de Telefonía SIP / VoIP
+    sip_group = parser.add_argument_group("Control y Gestión de Telefonía SIP / VoIP")
+    sip_group.add_argument(
+        "--disable-sip",
+        action="store_true",
+        help="Desactiva la telefonía SIP en el módem (libera la línea para Asterisk/FreePBX)."
+    )
+    sip_group.add_argument(
+        "--enable-sip",
+        action="store_true",
+        help="Reactiva la telefonía SIP en el módem."
+    )
+    sip_group.add_argument(
+        "--unregister-sip",
+        action="store_true",
+        help="Fuerza un desregistro inmediato en Telmex IMS (SIP REGISTER Expires: 0)."
+    )
+    sip_group.add_argument(
+        "--sip-status",
+        action="store_true",
+        help="Consulta exclusivamente el estado actual de la línea SIP VoIP."
+    )
+
     args = parser.parse_args()
 
     # 1. Identificar la IP del router
@@ -366,6 +452,44 @@ def main():
     print("[*] Conectando con el router e iniciando handshake criptográfico...")
 
     extractor = ZyxelPMG5617Extractor(host=ip_router, password=password)
+
+    # Si se solicitó una acción específica de VoIP SIP
+    if args.disable_sip or args.enable_sip or args.unregister_sip or args.sip_status:
+        try:
+            extractor.login()
+            if args.disable_sip:
+                res = extractor.set_sip_enabled(enable=False)
+                print(f"[✔] Telefonía SIP desactivada en el módem: {res.get('result')}")
+                st = extractor.get_sip_status()
+                print(f"    Estado actual de Registro: {st['status']} (Línea liberada para Asterisk/PBX)\n")
+            elif args.enable_sip:
+                res = extractor.set_sip_enabled(enable=True)
+                extractor.register_sip()
+                print(f"[✔] Telefonía SIP reactivada en el módem: {res.get('result')}")
+                st = extractor.get_sip_status()
+                print(f"    Estado actual de Registro: {st['status']}\n")
+            elif args.unregister_sip:
+                res = extractor.unregister_sip()
+                print(f"[✔] Desregistro puntual enviado a Telmex IMS: {res.get('result')}\n")
+            elif args.sip_status:
+                st = extractor.get_sip_status()
+                print("\n" + "=" * 55)
+                print("        ESTADO ACTUAL DE VOIP / SIP EN EL ROUTER        ")
+                print("=" * 55)
+                print(f"Número Telefónico:     {st['directory_number']}")
+                print(f"Usuario SIP IMS:       {st['auth_user']}")
+                print(f"Servidor IMS:          {st['proxy']}")
+                print(f"Cuenta Habilitada:     {st['line_enable']}")
+                print(f"Proveedor Perfil:      {st['provider_enable']}")
+                print(f"Estado de Registro:    {st['status']} (Up = Registrado)")
+                print(f"Estado de Llamada:     {st['call_state']}")
+                print("=" * 55 + "\n")
+        except Exception as e:
+            print(f"\n[❌] Error en operación SIP: {e}\n")
+            sys.exit(1)
+        finally:
+            extractor.logout()
+        sys.exit(0)
 
     try:
         data = extractor.extract_full_profile()

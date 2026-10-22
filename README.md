@@ -181,18 +181,22 @@ Contraseña WPA2 5.0 GHz: WpaPass_Simulada_123!
 
 ---
 
-## 📞 Gestión y Desactivación de Cuenta SIP / VoIP (`zyxel_sip_manager.py`)
+## 📞 Gestión y Desactivación de Cuenta SIP / VoIP
 
 Telmex IMS (`vims-h.telmex.com`) aplica una política estricta de **registro único**: solo un dispositivo a la vez puede estar registrado bajo el mismo número telefónico. Si mantienes la telefonía activa en el módem Zyxel mientras intentas registrar la línea en una centralita PBX externa (**Asterisk**, **FreePBX**, **3CX** o un conmutador IP en **PuertaOS**), ocurrirán colisiones de registro, errores `403 Forbidden` o las llamadas entrantes sonarán exclusivamente en el conector analógico RJ11 del módem.
 
 ### El reto del firmware Telmex y su solución
-El firmware Telmex bloquea la modificación de la cuenta individual (`sip_account`) retornando `403 Forbidden` al usuario estándar `TELMEX`. Para superar esta limitación, `zyxel_sip_manager.py` aplica ingeniería inversa sobre el objeto del proveedor SIP (`/cgi-bin/DAL?oid=sip_sp`) mediante peticiones `PUT` autenticadas y cifradas en **AES-256-CBC**, permitiendo desactivar o reactivar el demonio VoIP del módem de forma persistente.
+El firmware Telmex bloquea la modificación de la cuenta individual (`sip_account`) retornando `403 Forbidden` al usuario estándar `TELMEX`. Para superar esta limitación, implementamos ingeniería inversa sobre el objeto del proveedor SIP (`/cgi-bin/DAL?oid=sip_sp`) mediante peticiones `PUT` autenticadas y cifradas en **AES-256-CBC**, permitiendo desactivar o reactivar el demonio VoIP del módem de forma persistente.
 
-### Comandos de Gestión SIP:
+Esta funcionalidad está integrada tanto **de forma nativa en el script principal** (`zyxel_pmg5617_extractor.py`) como a través del script complementario (`zyxel_sip_manager.py`).
+
+---
+
+### Opción A: Desde el Script Principal Unificado (`zyxel_pmg5617_extractor.py`)
 
 #### 1. Consultar estado en tiempo real de la línea:
 ```bash
-python3 zyxel_sip_manager.py status
+python3 zyxel_pmg5617_extractor.py --sip-status
 ```
 *Salida:*
 ```text
@@ -211,17 +215,35 @@ Estado de Llamada:     Idle
 
 #### 2. Desactivar telefonía en el módem (Liberar línea para Asterisk/FreePBX):
 ```bash
-python3 zyxel_sip_manager.py disable
+python3 zyxel_pmg5617_extractor.py --disable-sip
 ```
-*Resultado:* Pone `Proveedor Perfil: Disabled`, cancela reintentos del módem y libera inmediatamente la línea para su uso externo sin afectar la conexión a Internet.
+*Resultado:* Pone `Proveedor Perfil: Disabled`, cancela reintentos automáticos del módem y libera inmediatamente la línea para su uso externo sin afectar la conexión a Internet.
 
 #### 3. Reactivar telefonía en el módem:
 ```bash
-python3 zyxel_sip_manager.py enable
+python3 zyxel_pmg5617_extractor.py --enable-sip
 ```
 
 #### 4. Forzar desregistro puntual (Unregister):
 ```bash
+python3 zyxel_pmg5617_extractor.py --unregister-sip
+```
+
+---
+
+### Opción B: Mediante la Utilidad Rápida (`zyxel_sip_manager.py`)
+
+```bash
+# Consultar estado:
+python3 zyxel_sip_manager.py status
+
+# Desactivar telefonía:
+python3 zyxel_sip_manager.py disable
+
+# Reactivar telefonía:
+python3 zyxel_sip_manager.py enable
+
+# Desregistro puntual:
 python3 zyxel_sip_manager.py unregister
 ```
 
